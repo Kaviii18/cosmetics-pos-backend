@@ -2,9 +2,9 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const express = require('express');
-const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const db = require('./config/db');
+const { createCors } = require('./config/cors');
 const { verifyToken, getJwtSecret } = require('./middleware/authMiddleware');
 
 const app = express();
@@ -19,25 +19,14 @@ getJwtSecret();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// CORS: only the origins listed in FRONTEND_URL (comma separated), e.g. https://my-pos.netlify.app
-const allowedOrigins = (process.env.FRONTEND_URL || '')
-  .split(',')
-  .map((o) => o.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
-if (isProduction && allowedOrigins.length === 0) {
-  console.warn('WARNING: FRONTEND_URL is not set. Browsers will be blocked by CORS until you set it.');
+// CORS (config/cors.js): only approved origins. Registered FIRST so that preflight (OPTIONS)
+// requests are answered before rate limiting / authentication, and so that error responses
+// (401, 404, 429, 500...) also carry the CORS headers.
+const corsPolicy = createCors();
+if (isProduction && corsPolicy.allowedOrigins.length === 0) {
+  console.warn('WARNING: FRONTEND_URL is not set. Only Netlify preview origins (if enabled) will pass CORS.');
 }
-app.use(cors({
-  origin(origin, callback) {
-    // no Origin header = curl / health checks / server-to-server: allowed
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    // local development convenience (never in production)
-    if (!isProduction && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return callback(null, true);
-    return callback(null, false);
-  },
-  exposedHeaders: ['X-Total-Count']
-}));
+app.use(corsPolicy.middleware);
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -76,8 +65,10 @@ app.use('/api', (req, res) => res.status(404).json({ message: 'Endpoint not foun
 
 // Global Error Handler
 app.use((err, req, res, next) => {
-  console.error('Unhandled Server Error:', err);
-  res.status(500).json({ message: 'Internal server error occurred.' });
+  // Client errors from body parsing (malformed JSON, payload too large) keep their 4xx status
+  const status = err && err.status >= 400 && err.status < 500 ? err.status : 500;
+  if (status === 500) console.error('Unhandled Server Error:', err);
+  res.status(status).json({ message: status === 500 ? 'Internal server error occurred.' : 'Invalid request.' });
 });
 
 // Initialize DB and start server
